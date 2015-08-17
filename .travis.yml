@@ -1,0 +1,77 @@
+
+language: php
+sudo: false
+
+php:
+  - 5.5
+  - 5.6
+  - 7
+  - hhvm
+
+# Install php packages required for running a web server from drush.
+addons:
+  apt:
+    packages:
+    - php5-cgi
+    - php5-mysql
+
+matrix:
+  allow_failures:
+    # PHP 7 testing is disabled for now since Drupal installation throws
+    # errors. See https://www.drupal.org/node/2454439
+    - php: 7
+    # We cannot use hhvm-nightly since that does not work in Travis CI's old
+    # Ubuntu 12.04.
+    - php: hhvm
+  # Don't wait for the allowed failures to build.
+  fast_finish: true
+
+
+# Cache Composer directory so that we don't have to download drush all the time.
+cache:
+  directories:
+    - $HOME/.composer/cache
+
+mysql:
+  database: drupal
+  username: root
+  encoding: utf8
+
+install:
+  - composer self-update
+  # Add composer's global bin directory to the path.
+  # @see: https://github.com/drush-ops/drush#install---composer
+  - export PATH="$HOME/.composer/vendor/bin:$PATH"
+
+  # install drush 8 globally, which is in beta right now.
+  - mkdir -p $HOME/.composer
+  - "echo '{\"minimum-stability\": \"beta\"}' > $HOME/.composer/composer.json"
+  - travis_retry composer global require drush/drush:8.0.x-dev
+
+before_script:
+
+  # Remove Xdebug as we don't need it and it causes
+  # PHP Fatal error:  Maximum function nesting level of '256' reached.
+  # We also don't care if that file exists or not on PHP 7.
+  - phpenv config-rm xdebug.ini || true
+
+  # Create new site, stubbing sendmail path with true to prevent delivery errors
+  # and manually resolving drush path.
+  - mysql -e 'create database drupal'
+  # Install Drupal.
+  - php -d sendmail_path=`which true` ~/.composer/vendor/bin/drush.php --yes site-install --db-url=mysql://root:@127.0.0.1/drupal testing
+
+  # Start a web server on port 8888, run in the background; wait for
+  # initialization. This is temporarly disabled since there are no web tests
+  # yet.
+  - drush --verbose --debug runserver 127.0.0.1:8888 > ~/debug.txt 2>&1 &
+  - sleep 5s
+
+script:
+  # Run the PHPUnit tests.
+  - ./vendor/phpunit/phpunit/phpunit -v -c core --testsuite unit
+  - ./vendor/phpunit/phpunit/phpunit -v -c core --testsuite kernel
+  - ./vendor/phpunit/phpunit/phpunit -v -c core --testsuite functional
+
+after_failure:
+  - cat ~/debug.txt
