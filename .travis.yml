@@ -1,0 +1,112 @@
+language: php
+
+php:
+  - 5.5
+  - 5.6
+  - 7
+#  - hhvm
+
+matrix:
+#  allow_failures:
+    # We cannot use hhvm-nightly since that does not work in Travis CI's old
+    # Ubuntu 12.04.
+#    - php: hhvm
+  # Don't wait for the allowed failures to build.
+  fast_finish: true
+
+
+# Cache Composer directory so that we don't have to download drush all the time.
+cache:
+  directories:
+    - $HOME/.composer/cache
+    - travis_phantomjs
+
+mysql:
+  database: drupal
+  username: root
+  encoding: utf8
+postgres:
+  adapter: postgresql
+  database: drupal
+  username: postgres
+sqlite:
+  adapter: sqlite3
+  database: drupal
+  username: root
+  timeout: 500
+
+env:
+  matrix:
+    - DRUPAL_VERSION='8.3.x' DB='mysql' SIMPLETEST_DB="$DB://root:@127.0.0.1/drupal" DB_USER='root' PHPUNIT_ARGS=--testsuite=unit
+    - DRUPAL_VERSION='8.3.x' DB='mysql' SIMPLETEST_DB="$DB://root:@127.0.0.1/drupal" DB_USER='root' PHPUNIT_ARGS=--testsuite=kernel
+    - DRUPAL_VERSION='8.3.x' DB='mysql' SIMPLETEST_DB="$DB://root:@127.0.0.1/drupal" DB_USER='root' PHPUNIT_ARGS=--testsuite=functional
+    - DRUPAL_VERSION='8.3.x' DB='mysql' SIMPLETEST_DB="$DB://root:@127.0.0.1/drupal" DB_USER='root' PHPUNIT_ARGS=--testsuite=functional-javascript
+    - DRUPAL_VERSION='8.3.x' DB='pgsql' SIMPLETEST_DB="$DB://postgres:@127.0.0.1/drupal" DB_USER='postgres' PHPUNIT_ARGS=--testsuite=unit
+    - DRUPAL_VERSION='8.3.x' DB='pgsql' SIMPLETEST_DB="$DB://postgres:@127.0.0.1/drupal" DB_USER='postgres' PHPUNIT_ARGS=--testsuite=kernel
+    - DRUPAL_VERSION='8.3.x' DB='pgsql' SIMPLETEST_DB="$DB://postgres:@127.0.0.1/drupal" DB_USER='postgres' PHPUNIT_ARGS=--testsuite=functional
+    - DRUPAL_VERSION='8.3.x' DB='pgsql' SIMPLETEST_DB="$DB://postgres:@127.0.0.1/drupal" DB_USER='postgres' PHPUNIT_ARGS=--testsuite=functional-javascript
+    - DRUPAL_VERSION='8.3.x' DB='sqlite' SIMPLETEST_DB="$DB://root:@127.0.0.1/drupal" DB_USER='root' PHPUNIT_ARGS=--testsuite=unit
+    - DRUPAL_VERSION='8.3.x' DB='sqlite' SIMPLETEST_DB="$DB://root:@127.0.0.1/drupal" DB_USER='root' PHPUNIT_ARGS=--testsuite=kernel
+    - DRUPAL_VERSION='8.3.x' DB='sqlite' SIMPLETEST_DB="$DB://root:@127.0.0.1/drupal" DB_USER='root' PHPUNIT_ARGS=--testsuite=functional
+    - DRUPAL_VERSION='8.3.x' DB='sqlite' SIMPLETEST_DB="$DB://root:@127.0.0.1/drupal" DB_USER='root' PHPUNIT_ARGS=--testsuite=functional-javascript
+
+  global:
+    - SIMPLETEST_BASE_URL=http://127.0.0.1:8888
+    - DRUSH_VERSION='~8.0'
+
+before_install:
+
+  # Remove Xdebug as we don't need it and it causes
+  # PHP Fatal error:  Maximum function nesting level of '256' reached.
+  # We also don't care if that file exists or not on PHP 7.
+  - phpenv config-rm xdebug.ini
+  # apcu is only needed for kernel tests.
+  - if [[ $TRAVIS_PHP_VERSION != 'hhvm' && $PHPUNIT_ARGS = '--testsuite=kernel' ]] ; then pecl channel-update pecl.php.net; fi;
+  - if [[ $TRAVIS_PHP_VERSION =~ 5.[56] && $PHPUNIT_ARGS = '--testsuite=kernel' ]] ; then echo yes | pecl install apcu-4.0.10; fi;
+  - if [[ $TRAVIS_PHP_VERSION = 7 && $PHPUNIT_ARGS = '--testsuite=kernel' ]] ; then pecl config-set preferred_state beta; echo yes | pecl install apcu; fi;
+  - if [[ $TRAVIS_PHP_VERSION != 'hhvm' && $PHPUNIT_ARGS = '--testsuite=kernel' ]]; then phpenv config-add ./travis.php.ini; fi;
+  # phantomjs is only needed for JS tests.
+  - phantomjs --version;
+  - export PATH=$PWD/travis_phantomjs/phantomjs-2.1.1-linux-x86_64/bin:$PATH;
+  - phantomjs --version;
+  - if [[ $(phantomjs --version) != '2.1.1' && $PHPUNIT_ARGS == '--testsuite=functional-javascript' ]]; then rm -rf $PWD/travis_phantomjs; mkdir -p $PWD/travis_phantomjs; wget https://assets.membergetmember.co/software/phantomjs-2.1.1-linux-x86_64.tar.bz2 -O $PWD/travis_phantomjs/phantomjs-2.1.1-linux-x86_64.tar.bz2; tar -xvf $PWD/travis_phantomjs/phantomjs-2.1.1-linux-x86_64.tar.bz2 -C $PWD/travis_phantomjs; fi;
+  - phantomjs --version
+
+install:
+  # Add composer's global bin directory to the path.
+  - export PATH="$HOME/.composer/vendor/bin:$PATH"
+
+  # Install drush globally
+  - composer global require drush/drush:$DRUSH_VERSION
+
+before_script:
+  - ps axo pid,command | grep phantomjs | grep -v grep | awk '{print $1}' | xargs -I {} kill {}
+  - ps axo pid,command | grep php | grep -v grep | grep -v phpstorm | awk '{print $1}' | xargs -I {} kill {}
+  - sleep 2
+  # Run composer install.
+  - composer install
+  # Create database.
+  - drush sql-create --verbose --debug --yes --db-su=$DB_USER --db-url=$SIMPLETEST_DB
+  # Install Drupal.
+  - php -d sendmail_path=`which true` ~/.composer/vendor/bin/drush.php --yes site-install --db-url=$SIMPLETEST_DB testing
+  # Create the sites/simpletest only if not exists
+  - if [ ! -d sites/simpletest ] ; then mkdir sites/simpletest; fi;
+  # Start a web server on port 8888, run in the background; wait for
+  # initialization. This is temporarly disabled since there are no web tests
+  # yet.
+  - drush --verbose --debug runserver 127.0.0.1:8888 > ~/debug.txt 2>&1 &
+  - sleep 5s
+  - phantomjs --ssl-protocol=any --ignore-ssl-errors=true ./vendor/jcalderonzumba/gastonjs/src/Client/main.js 8510 1024 768 2>&1 >> /dev/null &
+  - sleep 2
+
+script:
+  # Run the PHPUnit tests.
+  - ./vendor/phpunit/phpunit/phpunit -v -c core $PHPUNIT_ARGS
+
+after_script:
+  - ps axo pid,command | grep phantomjs | grep -v grep | awk '{print $1}' | xargs -I {} kill {}
+  - ps axo pid,command | grep php | grep -v grep | awk '{print $1}' | xargs -I {} kill {}
+
+after_failure:
+  - echo "Failures detected. Outputing additional logs:"
+  - cat ~/debug.txt
